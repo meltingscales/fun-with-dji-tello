@@ -103,7 +103,9 @@ class TelloFaceController:
 
         print("Starting video stream...")
         self.tello.streamon()
-        time.sleep(2)
+        print("Waiting for sensors to calibrate (this takes ~5 seconds)...")
+        time.sleep(5)  # Increased delay for sensor calibration
+        print("Ready to fly!")
         return True
 
     def update_velocities(self):
@@ -137,10 +139,33 @@ class TelloFaceController:
 
     def takeoff(self):
         if not self.in_flight:
-            print("Taking off...")
-            self.tello.takeoff()
-            self.in_flight = True
-            print("In the air!")
+            print("\n" + "="*50)
+            print("TAKEOFF CHECKLIST:")
+            print("="*50)
+            print("✓ Ensure drone is on a FLAT surface")
+            print("✓ Ensure good lighting (not too dark)")
+            print("✓ Remove any obstacles around drone")
+            print("✓ Keep away from metal surfaces")
+            print("✓ Propeller guards (if any) are secure")
+            print("="*50)
+            print("\nAttempting takeoff in 2 seconds...")
+            time.sleep(2)
+
+            try:
+                print("Sending takeoff command...")
+                self.tello.takeoff()
+                self.in_flight = True
+                print("✓ Successfully in the air!")
+            except Exception as e:
+                print(f"\n✗ TAKEOFF FAILED: {e}")
+                print("\nTroubleshooting tips:")
+                print("  1. Place drone on a flat, non-reflective surface")
+                print("  2. Ensure room has good lighting")
+                print("  3. Move away from metal objects/surfaces")
+                print("  4. Check propellers are not obstructed")
+                print("  5. Try power cycling the drone")
+                print("  6. Ensure propeller guards (if any) are properly attached")
+                self.in_flight = False
 
     def land(self):
         if self.in_flight:
