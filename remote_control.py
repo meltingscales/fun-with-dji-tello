@@ -20,14 +20,15 @@ Features:
 import cv2
 import time
 import keyboard
-import numpy as np
 from djitellopy import Tello
+from lib import TelloConnection, FlightController, VideoUtils, print_controls
+from constants import *
 
 
 class TelloController:
     def __init__(self):
         self.tello = Tello()
-        self.speed = 50  # Speed percentage (0-100)
+        self.speed = DEFAULT_SPEED
         self.running = False
         self.in_flight = False
 
@@ -39,19 +40,7 @@ class TelloController:
 
     def connect(self):
         """Connect to the Tello drone"""
-        print("Connecting to Tello...")
-        self.tello.connect()
-        battery = self.tello.get_battery()
-        print(f"Connected! Battery: {battery}%")
-
-        if battery < 10:
-            print("WARNING: Battery is very low! Charge before flying.")
-            return False
-
-        print("Starting video stream...")
-        self.tello.streamon()
-        time.sleep(2)
-        return True
+        return TelloConnection.connect_and_start_video(tello=self.tello)
 
     def update_velocities(self):
         """Update velocity values based on currently pressed keys"""
@@ -89,43 +78,17 @@ class TelloController:
 
     def takeoff(self):
         if not self.in_flight:
-            print("Taking off...")
-            self.tello.takeoff()
-            self.in_flight = True
-            print("In the air!")
+            if FlightController.safe_takeoff(self.tello):
+                self.in_flight = True
 
     def land(self):
         if self.in_flight:
-            print("Landing...")
-            self.tello.send_rc_control(0, 0, 0, 0)
-            self.tello.land()
-            self.in_flight = False
-            print("Landed!")
+            if FlightController.safe_land(self.tello):
+                self.in_flight = False
 
     def emergency_land(self):
-        print("Emergency landing!")
-        self.tello.send_rc_control(0, 0, 0, 0)
-        self.tello.land()
+        FlightController.emergency_land(self.tello)
         self.in_flight = False
-
-    def create_edge_view(self, frame):
-        """Create edge detection view for low light visibility"""
-        # Convert to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Apply Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Apply Canny edge detection
-        edges = cv2.Canny(blurred, 50, 150)
-
-        # Convert back to BGR for display
-        edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-
-        # Make edges more visible (green tint)
-        edges_bgr[:, :, 1] = edges  # Green channel
-
-        return edges_bgr
 
     def get_active_commands(self):
         """Get string of currently active commands"""
@@ -153,31 +116,35 @@ class TelloController:
         """Add overlay information to frame"""
         # Flight status
         status = "FLYING" if self.in_flight else "ON GROUND"
-        color = (0, 255, 0) if self.in_flight else (0, 0, 255)
-        cv2.putText(frame, f"Status: {status}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        status_color = COLOR_GREEN if self.in_flight else COLOR_RED
+        VideoUtils.add_text_overlay(frame, f"Status: {status}", (10, 30),
+                                    font_scale=0.6, color=status_color)
 
         # Battery
-        battery_color = (0, 255, 0) if battery > 30 else (0, 165, 255) if battery > 15 else (0, 0, 255)
-        cv2.putText(frame, f"Bat: {battery}%", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, battery_color, 2)
+        battery_color = VideoUtils.get_battery_color(battery)
+        VideoUtils.add_text_overlay(frame, f"Bat: {battery}%", (10, 60),
+                                    font_scale=0.5, color=battery_color)
 
         # Active commands
         active_cmds = self.get_active_commands()
-        cmd_color = (0, 255, 0) if active_cmds != "None" else (128, 128, 128)
-        cv2.putText(frame, f"Active: {active_cmds}", (10, 90),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, cmd_color, 2)
+        cmd_color = COLOR_GREEN if active_cmds != "None" else COLOR_GRAY
+        VideoUtils.add_text_overlay(frame, f"Active: {active_cmds}", (10, 90),
+                                    font_scale=0.5, color=cmd_color)
 
         # Velocity
-        cv2.putText(frame, f"Vel: LR:{self.left_right:+3d} FB:{self.forward_backward:+3d}",
-                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-        cv2.putText(frame, f"     UD:{self.up_down:+3d} YAW:{self.yaw:+3d}",
-                    (10, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        VideoUtils.add_text_overlay(
+            frame, f"Vel: LR:{self.left_right:+3d} FB:{self.forward_backward:+3d}",
+            (10, 120), font_scale=0.4, color=COLOR_WHITE, thickness=1
+        )
+        VideoUtils.add_text_overlay(
+            frame, f"     UD:{self.up_down:+3d} YAW:{self.yaw:+3d}",
+            (10, 140), font_scale=0.4, color=COLOR_WHITE, thickness=1
+        )
 
         # View label
         view_label = "EDGE VIEW" if is_edge_view else "COLOR VIEW"
-        cv2.putText(frame, view_label, (10, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        VideoUtils.add_text_overlay(frame, view_label, (10, frame.shape[0] - 10),
+                                    font_scale=0.5, color=COLOR_YELLOW)
 
         return frame
 
@@ -189,14 +156,18 @@ class TelloController:
         print("\n" + "="*60)
         print("TELLO REMOTE CONTROL - CONTINUOUS MOVEMENT")
         print("="*60)
-        print("\nControls (HOLD keys for continuous movement):")
-        print("  W/A/S/D - Move forward/left/back/right")
-        print("  I/P     - Move up/down")
-        print("  Q/E     - Rotate left/right")
-        print("  T       - Take off")
-        print("  L       - Land")
-        print("  ESC     - Emergency land and quit")
-        print("\nDual view: Color (left) + Edge detection (right)")
+
+        # Print controls using library function
+        print_controls({
+            'W/A/S/D': 'Move forward/left/back/right (HOLD)',
+            'I/P': 'Move up/down (HOLD)',
+            'Q/E': 'Rotate left/right (HOLD)',
+            'T': 'Take off',
+            'L': 'Land',
+            'ESC': 'Emergency land and quit'
+        })
+
+        print("Dual view: Color (left) + Edge detection (right)")
         print("Edge view helps with low-light visibility!")
         print("="*60 + "\n")
 
@@ -215,8 +186,8 @@ class TelloController:
                     # Resize to standard size
                     frame = cv2.resize(frame, (480, 360))
 
-                    # Create edge detection view
-                    edges = self.create_edge_view(frame)
+                    # Create edge detection view using library
+                    edges = VideoUtils.create_edge_view(frame)
 
                     # Get battery
                     battery = self.tello.get_battery()
@@ -225,8 +196,10 @@ class TelloController:
                     frame_with_overlay = self.add_overlay(frame.copy(), battery, False)
                     edges_with_overlay = self.add_overlay(edges.copy(), battery, True)
 
-                    # Combine both views side by side
-                    combined = np.hstack([frame_with_overlay, edges_with_overlay])
+                    # Combine both views side by side using library
+                    combined = VideoUtils.combine_views_horizontal(
+                        frame_with_overlay, edges_with_overlay
+                    )
 
                     # Display
                     cv2.imshow('Tello Remote Control - Color + Edges', combined)
@@ -234,9 +207,8 @@ class TelloController:
                 # Update velocities continuously
                 self.update_velocities()
 
-                # Small delay to prevent CPU overload
-                if cv2.waitKey(10) & 0xFF == ord('q'):
-                    break
+                # Small delay to prevent CPU overload (ESC only for quit - Q is for rotation!)
+                cv2.waitKey(10)
 
                 # Check if ESC was pressed
                 if keyboard.is_pressed('esc'):

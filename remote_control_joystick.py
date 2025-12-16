@@ -26,8 +26,16 @@ Features:
 import cv2
 import time
 import pygame
-import numpy as np
 from djitellopy import Tello
+from lib import (
+    TelloConnection,
+    FlightController,
+    VideoUtils,
+    FaceDetector,
+    FPSCounter,
+    print_controls
+)
+from constants import *
 
 
 class ControllerConfig:
@@ -37,7 +45,7 @@ class ControllerConfig:
         self.name = controller_name.lower()
 
         # Default (PS4-style) configuration
-        self.deadzone = 0.08
+        self.deadzone = CONTROLLER_DEADZONE
 
         # Axes (analog sticks)
         self.left_x = 0  # Yaw
@@ -59,7 +67,7 @@ class ControllerConfig:
         # Detect controller type and adjust mappings
         if "xbox" in self.name:
             print("Xbox controller detected!")
-            self.deadzone = 0.09
+            self.deadzone = XBOX_DEADZONE
             self.btn_takeoff = 14  # Y
             self.btn_land = 11     # A
             self.btn_photo = 13    # X
@@ -72,41 +80,12 @@ class ControllerConfig:
             print("Using PS4-style button layout")
 
 
-class FaceDetector:
-    """Lightweight face detection using OpenCV's Haar Cascades"""
-
-    def __init__(self):
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
-        self.enabled = False  # Off by default for performance
-        self.face_count = 0
-
-    def detect_faces(self, frame):
-        if not self.enabled:
-            return []
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        return faces
-
-    def draw_faces(self, frame, faces):
-        self.face_count = len(faces)
-        for i, (x, y, w, h) in enumerate(faces):
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
-            label = f"Face #{i + 1}"
-            cv2.rectangle(frame, (x, y - 25), (x + 100, y), (0, 255, 0), -1)
-            cv2.putText(frame, label, (x + 2, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-        return frame
-
-
 class TelloJoystickController:
     def __init__(self):
         self.tello = Tello()
         self.running = False
         self.in_flight = False
-        self.face_detector = FaceDetector()
+        self.face_detector = FaceDetector(enabled=False)  # Off by default for performance
 
         # Velocities (-100 to 100)
         self.left_right = 0
@@ -115,9 +94,7 @@ class TelloJoystickController:
         self.yaw = 0
 
         # FPS tracking
-        self.fps_start = time.time()
-        self.fps_counter = 0
-        self.fps = 0
+        self.fps_counter = FPSCounter()
 
         # Initialize pygame and joystick
         pygame.init()
@@ -136,19 +113,7 @@ class TelloJoystickController:
 
     def connect(self):
         """Connect to the Tello drone"""
-        print("\nConnecting to Tello...")
-        self.tello.connect()
-        battery = self.tello.get_battery()
-        print(f"Connected! Battery: {battery}%")
-
-        if battery < 10:
-            print("WARNING: Battery is very low! Charge before flying.")
-            return False
-
-        print("Starting video stream...")
-        self.tello.streamon()
-        time.sleep(2)
-        return True
+        return TelloConnection.connect_and_start_video(tello=self.tello)
 
     def apply_deadzone(self, value):
         """Apply deadzone to prevent drift"""
@@ -181,75 +146,65 @@ class TelloJoystickController:
 
     def takeoff(self):
         if not self.in_flight:
-            print("Taking off...")
-            self.tello.takeoff()
-            self.in_flight = True
-            print("In the air!")
+            if FlightController.safe_takeoff(self.tello):
+                self.in_flight = True
 
     def land(self):
         if self.in_flight:
-            print("Landing...")
-            self.tello.send_rc_control(0, 0, 0, 0)
-            self.tello.land()
-            self.in_flight = False
-            print("Landed!")
+            if FlightController.safe_land(self.tello):
+                self.in_flight = False
 
     def emergency_stop(self):
-        print("EMERGENCY STOP!")
-        self.tello.send_rc_control(0, 0, 0, 0)
-        self.tello.emergency()
+        FlightController.emergency_land(self.tello)
         self.in_flight = False
 
     def toggle_face_detection(self):
-        self.face_detector.enabled = not self.face_detector.enabled
-        status = "ON" if self.face_detector.enabled else "OFF"
+        enabled = self.face_detector.toggle()
+        status = "ON" if enabled else "OFF"
         print(f"Face detection: {status}")
 
-    def create_edge_view(self, frame):
-        """Create edge detection view for low light visibility"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
-        edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        edges_bgr[:, :, 1] = edges
-        return edges_bgr
-
     def add_overlay(self, frame, battery=0, is_edge_view=False):
-        """Add telemetry overlay to frame"""
+        """Add overlay information to frame"""
         # Flight status
         status = "FLYING" if self.in_flight else "ON GROUND"
-        color = (0, 255, 0) if self.in_flight else (0, 0, 255)
-        cv2.putText(frame, f"Status: {status}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        status_color = COLOR_GREEN if self.in_flight else COLOR_RED
+        VideoUtils.add_text_overlay(frame, f"Status: {status}", (10, 25),
+                                    font_scale=0.5, color=status_color)
 
         # Battery
-        battery_color = (0, 255, 0) if battery > 30 else (0, 165, 255) if battery > 15 else (0, 0, 255)
-        cv2.putText(frame, f"Battery: {battery}%", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, battery_color, 2)
+        battery_color = VideoUtils.get_battery_color(battery)
+        VideoUtils.add_text_overlay(frame, f"Bat: {battery}%", (10, 50),
+                                    font_scale=0.45, color=battery_color)
 
-        # Face detection
-        if not is_edge_view and self.face_detector.enabled:
-            cv2.putText(frame, f"Faces: {self.face_detector.face_count}",
-                        (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
+        # Face detection (color view only)
+        if not is_edge_view:
+            face_status = "ON" if self.face_detector.enabled else "OFF"
+            face_color = COLOR_GREEN if self.face_detector.enabled else COLOR_GRAY
+            VideoUtils.add_text_overlay(
+                frame, f"Faces: {face_status} ({self.face_detector.face_count})",
+                (10, 75), font_scale=0.4, color=face_color, thickness=1
+            )
 
-        # Controller input
-        cv2.putText(frame, f"Roll:{self.left_right:+4d} Pitch:{self.forward_backward:+4d}",
-                    (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
-        cv2.putText(frame, f"Thro:{self.up_down:+4d} Yaw:{self.yaw:+4d}",
-                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+        # Stick positions
+        VideoUtils.add_text_overlay(
+            frame, f"LR:{self.left_right:+4d} FB:{self.forward_backward:+4d}",
+            (10, 100), font_scale=0.4, color=COLOR_WHITE, thickness=1
+        )
+        VideoUtils.add_text_overlay(
+            frame, f"UD:{self.up_down:+4d} YAW:{self.yaw:+4d}",
+            (10, 120), font_scale=0.4, color=COLOR_WHITE, thickness=1
+        )
 
         # FPS
-        cv2.putText(frame, f"FPS: {self.fps:.1f}", (10, 140),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+        VideoUtils.add_text_overlay(
+            frame, f"FPS: {self.fps_counter.get_fps():.1f}",
+            (10, 140), font_scale=0.35, color=COLOR_WHITE, thickness=1
+        )
 
         # View label
         view_label = "EDGE VIEW" if is_edge_view else "COLOR VIEW"
-        cv2.putText(frame, view_label, (10, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 2)
-
-        # Controller name
-        cv2.putText(frame, self.config.name[:20], (frame.shape[1] - 200, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+        VideoUtils.add_text_overlay(frame, view_label, (10, frame.shape[0] - 10),
+                                    font_scale=0.45, color=COLOR_YELLOW)
 
         return frame
 
@@ -262,13 +217,17 @@ class TelloJoystickController:
         print("TELLO JOYSTICK/CONTROLLER CONTROL")
         print("="*70)
         print(f"\nUsing controller: {self.joystick.get_name()}")
-        print("\nControls:")
-        print("  Left Stick  - Throttle (Y) / Yaw (X)")
-        print("  Right Stick - Pitch (Y) / Roll (X)")
-        print("  Triangle/Y  - Take off")
-        print("  Cross/A     - Land")
-        print("  Circle/B    - Toggle face detection")
-        print("  L1/LB       - EMERGENCY STOP")
+
+        # Print controls using library function
+        print_controls({
+            'Left Stick': 'Throttle (Y) / Yaw (X)',
+            'Right Stick': 'Pitch (Y) / Roll (X)',
+            'Triangle/Y': 'Take off',
+            'Cross/A': 'Land',
+            'Circle/B': 'Toggle face detection',
+            'L1/LB': 'EMERGENCY STOP'
+        })
+
         print("\nDual view: Color (top) + Edge detection (bottom)")
         print("="*70 + "\n")
 
@@ -298,32 +257,30 @@ class TelloJoystickController:
                 # Get video frame
                 frame = self.tello.get_frame_read().frame
                 if frame is not None:
-                    frame = cv2.resize(frame, (640, 480))
+                    frame = cv2.resize(frame, (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
 
-                    # Face detection
+                    # Face detection using library
                     faces = self.face_detector.detect_faces(frame)
                     if len(faces) > 0 and self.face_detector.enabled:
                         frame = self.face_detector.draw_faces(frame, faces)
 
-                    # Create edge view
-                    edges = self.create_edge_view(frame)
+                    # Create edge view using library
+                    edges = VideoUtils.create_edge_view(frame)
 
                     # Get battery
                     battery = self.tello.get_battery()
 
                     # Calculate FPS
-                    self.fps_counter += 1
-                    if self.fps_counter >= 20:
-                        self.fps = self.fps_counter / (time.time() - self.fps_start)
-                        self.fps_start = time.time()
-                        self.fps_counter = 0
+                    self.fps_counter.update()
 
                     # Add overlays
                     frame_with_overlay = self.add_overlay(frame.copy(), battery, False)
                     edges_with_overlay = self.add_overlay(edges.copy(), battery, True)
 
-                    # Combine views vertically
-                    combined = np.vstack([frame_with_overlay, edges_with_overlay])
+                    # Combine views vertically using library
+                    combined = VideoUtils.combine_views_vertical(
+                        frame_with_overlay, edges_with_overlay
+                    )
 
                     # Display
                     cv2.imshow('Tello Joystick Control - Color + Edges', combined)
@@ -356,9 +313,9 @@ def main():
     print("\n" + "="*70)
     print("TELLO JOYSTICK/CONTROLLER CONTROL")
     print("="*70)
-    print("\nPlease connect your game controller before starting.")
-    print("Supported: PS4, Xbox One, and generic USB controllers")
-    print("\nChecking for controller...")
+    print("\nMake sure your controller is connected before starting!")
+    print("Starting in 2 seconds...\n")
+    time.sleep(2)
 
     try:
         controller = TelloJoystickController()
@@ -366,9 +323,9 @@ def main():
     except Exception as e:
         print(f"\nError: {e}")
         print("\nTroubleshooting:")
-        print("- Make sure your controller is connected")
-        print("- Try disconnecting and reconnecting it")
-        print("- Check that your controller is recognized by your OS")
+        print("  1. Make sure your controller is connected")
+        print("  2. Check if the controller is detected by your system")
+        print("  3. Try reconnecting the controller")
 
 
 if __name__ == "__main__":

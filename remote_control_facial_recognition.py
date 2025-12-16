@@ -22,60 +22,23 @@ Features:
 import cv2
 import time
 import keyboard
-import numpy as np
 from djitellopy import Tello
-
-
-class FaceDetector:
-    """Lightweight face detection using OpenCV's Haar Cascades"""
-
-    def __init__(self):
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        self.face_cascade = cv2.CascadeClassifier(cascade_path)
-
-        if self.face_cascade.empty():
-            print("Warning: Could not load face detection model!")
-            self.available = False
-        else:
-            self.available = True
-            print("Face detection model loaded successfully!")
-
-        self.enabled = True
-        self.face_count = 0
-
-    def detect_faces(self, frame):
-        """Detect faces in the frame"""
-        if not self.available or not self.enabled:
-            return []
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-        )
-        return faces
-
-    def draw_faces(self, frame, faces):
-        """Draw boxes around detected faces"""
-        self.face_count = len(faces)
-
-        for i, (x, y, w, h) in enumerate(faces):
-            # Draw rectangle
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
-
-            # Add label
-            label = f"Face #{i + 1}"
-            cv2.rectangle(frame, (x, y - 25), (x + 100, y), (0, 255, 0), -1)
-            cv2.putText(frame, label, (x + 2, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-
-        return frame
+from lib import (
+    TelloConnection,
+    FlightController,
+    VideoUtils,
+    FaceDetector,
+    FPSCounter,
+    print_controls
+)
+from constants import *
 
 
 class TelloFaceController:
     def __init__(self):
         self.tello = Tello()
-        self.face_detector = FaceDetector()
-        self.speed = 50
+        self.face_detector = FaceDetector(enabled=True)
+        self.speed = DEFAULT_SPEED
         self.running = False
         self.in_flight = False
 
@@ -86,27 +49,11 @@ class TelloFaceController:
         self.yaw = 0
 
         # FPS tracking
-        self.fps_start = time.time()
-        self.fps_counter = 0
-        self.fps = 0
+        self.fps_counter = FPSCounter()
 
     def connect(self):
         """Connect to the Tello drone"""
-        print("Connecting to Tello...")
-        self.tello.connect()
-        battery = self.tello.get_battery()
-        print(f"Connected! Battery: {battery}%")
-
-        if battery < 10:
-            print("WARNING: Battery is very low! Charge before flying.")
-            return False
-
-        print("Starting video stream...")
-        self.tello.streamon()
-        print("Waiting for sensors to calibrate (this takes ~5 seconds)...")
-        time.sleep(5)  # Increased delay for sensor calibration
-        print("Ready to fly!")
-        return True
+        return TelloConnection.connect_and_start_video(tello=self.tello)
 
     def update_velocities(self):
         """Update velocity values based on currently pressed keys"""
@@ -139,61 +86,26 @@ class TelloFaceController:
 
     def takeoff(self):
         if not self.in_flight:
-            print("\n" + "="*50)
-            print("TAKEOFF CHECKLIST:")
-            print("="*50)
-            print("✓ Ensure drone is on a FLAT surface")
-            print("✓ Ensure good lighting (not too dark)")
-            print("✓ Remove any obstacles around drone")
-            print("✓ Keep away from metal surfaces")
-            print("✓ Propeller guards (if any) are secure")
-            print("="*50)
-            print("\nAttempting takeoff in 2 seconds...")
-            time.sleep(2)
+            # Use library's pre-flight check
+            if not TelloConnection.check_preflight(self.tello):
+                return
 
-            try:
-                print("Sending takeoff command...")
-                self.tello.takeoff()
+            if FlightController.safe_takeoff(self.tello):
                 self.in_flight = True
-                print("✓ Successfully in the air!")
-            except Exception as e:
-                print(f"\n✗ TAKEOFF FAILED: {e}")
-                print("\nTroubleshooting tips:")
-                print("  1. Place drone on a flat, non-reflective surface")
-                print("  2. Ensure room has good lighting")
-                print("  3. Move away from metal objects/surfaces")
-                print("  4. Check propellers are not obstructed")
-                print("  5. Try power cycling the drone")
-                print("  6. Ensure propeller guards (if any) are properly attached")
-                self.in_flight = False
 
     def land(self):
         if self.in_flight:
-            print("Landing...")
-            self.tello.send_rc_control(0, 0, 0, 0)
-            self.tello.land()
-            self.in_flight = False
-            print("Landed!")
+            if FlightController.safe_land(self.tello):
+                self.in_flight = False
 
     def emergency_land(self):
-        print("Emergency landing!")
-        self.tello.send_rc_control(0, 0, 0, 0)
-        self.tello.land()
+        FlightController.emergency_land(self.tello)
         self.in_flight = False
 
     def toggle_face_detection(self):
-        self.face_detector.enabled = not self.face_detector.enabled
-        status = "ON" if self.face_detector.enabled else "OFF"
+        enabled = self.face_detector.toggle()
+        status = "ON" if enabled else "OFF"
         print(f"Face detection: {status}")
-
-    def create_edge_view(self, frame):
-        """Create edge detection view for low light visibility"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        edges = cv2.Canny(blurred, 50, 150)
-        edges_bgr = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-        edges_bgr[:, :, 1] = edges  # Green channel for visibility
-        return edges_bgr
 
     def get_active_commands(self):
         """Get string of currently active commands"""
@@ -220,38 +132,45 @@ class TelloFaceController:
         """Add overlay information to frame"""
         # Flight status
         status = "FLYING" if self.in_flight else "ON GROUND"
-        color = (0, 255, 0) if self.in_flight else (0, 0, 255)
-        cv2.putText(frame, f"Status: {status}", (10, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        status_color = COLOR_GREEN if self.in_flight else COLOR_RED
+        VideoUtils.add_text_overlay(frame, f"Status: {status}", (10, 25),
+                                    font_scale=0.5, color=status_color)
 
         # Battery
-        battery_color = (0, 255, 0) if battery > 30 else (0, 165, 255) if battery > 15 else (0, 0, 255)
-        cv2.putText(frame, f"Bat: {battery}%", (10, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, battery_color, 2)
+        battery_color = VideoUtils.get_battery_color(battery)
+        VideoUtils.add_text_overlay(frame, f"Bat: {battery}%", (10, 50),
+                                    font_scale=0.45, color=battery_color)
 
         # Face detection status
         if not is_edge_view:
             face_status = "ON" if self.face_detector.enabled else "OFF"
-            face_color = (0, 255, 0) if self.face_detector.enabled else (128, 128, 128)
-            cv2.putText(frame, f"Faces: {face_status} ({self.face_detector.face_count})",
-                        (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.45, face_color, 2)
+            face_color = COLOR_GREEN if self.face_detector.enabled else COLOR_GRAY
+            VideoUtils.add_text_overlay(
+                frame, f"Faces: {face_status} ({self.face_detector.face_count})",
+                (10, 75), font_scale=0.45, color=face_color
+            )
 
         # Active commands
         active_cmds = self.get_active_commands()
-        cmd_color = (0, 255, 0) if active_cmds != "None" else (128, 128, 128)
-        cv2.putText(frame, f"Active: {active_cmds}", (10, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, cmd_color, 1)
+        cmd_color = COLOR_GREEN if active_cmds != "None" else COLOR_GRAY
+        VideoUtils.add_text_overlay(frame, f"Active: {active_cmds}", (10, 100),
+                                    font_scale=0.4, color=cmd_color, thickness=1)
 
         # Velocity and FPS
-        cv2.putText(frame, f"FPS: {self.fps:.1f}", (10, 120),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
-        cv2.putText(frame, f"Vel: {self.left_right:+3d},{self.forward_backward:+3d},{self.up_down:+3d},{self.yaw:+3d}",
-                    (10, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1)
+        VideoUtils.add_text_overlay(
+            frame, f"FPS: {self.fps_counter.get_fps():.1f}", (10, 120),
+            font_scale=0.35, color=COLOR_WHITE, thickness=1
+        )
+        VideoUtils.add_text_overlay(
+            frame,
+            f"Vel: {self.left_right:+3d},{self.forward_backward:+3d},{self.up_down:+3d},{self.yaw:+3d}",
+            (10, 135), font_scale=0.35, color=COLOR_WHITE, thickness=1
+        )
 
         # View label
         view_label = "EDGE VIEW" if is_edge_view else "COLOR VIEW"
-        cv2.putText(frame, view_label, (10, frame.shape[0] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 2)
+        VideoUtils.add_text_overlay(frame, view_label, (10, frame.shape[0] - 10),
+                                    font_scale=0.45, color=COLOR_YELLOW)
 
         return frame
 
@@ -263,14 +182,18 @@ class TelloFaceController:
         print("\n" + "="*70)
         print("TELLO REMOTE CONTROL WITH FACE RECOGNITION")
         print("="*70)
-        print("\nControls (HOLD keys for continuous movement):")
-        print("  W/A/S/D - Move forward/left/back/right")
-        print("  I/P     - Move up/down")
-        print("  Q/E     - Rotate left/right")
-        print("  T       - Take off")
-        print("  L       - Land")
-        print("  F       - Toggle face detection on/off")
-        print("  ESC     - Emergency land and quit")
+
+        # Print controls using library function
+        print_controls({
+            'W/A/S/D': 'Move forward/left/back/right (HOLD)',
+            'I/P': 'Move up/down (HOLD)',
+            'Q/E': 'Rotate left/right (HOLD)',
+            'T': 'Take off',
+            'L': 'Land',
+            'F': 'Toggle face detection on/off',
+            'ESC': 'Emergency land and quit'
+        })
+
         print("\nDual view: Color (top) + Edge detection (bottom)")
         print("Edge view helps with low-light visibility!")
         print("="*70 + "\n")
@@ -288,32 +211,30 @@ class TelloFaceController:
                 frame = self.tello.get_frame_read().frame
                 if frame is not None:
                     # Resize
-                    frame = cv2.resize(frame, (640, 480))
+                    frame = cv2.resize(frame, (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
 
-                    # Detect and draw faces on color view
+                    # Detect and draw faces on color view using library
                     faces = self.face_detector.detect_faces(frame)
                     if len(faces) > 0 and self.face_detector.enabled:
                         frame = self.face_detector.draw_faces(frame, faces)
 
-                    # Create edge view
-                    edges = self.create_edge_view(frame)
+                    # Create edge view using library
+                    edges = VideoUtils.create_edge_view(frame)
 
                     # Get battery
                     battery = self.tello.get_battery()
 
                     # Calculate FPS
-                    self.fps_counter += 1
-                    if self.fps_counter >= 20:
-                        self.fps = self.fps_counter / (time.time() - self.fps_start)
-                        self.fps_start = time.time()
-                        self.fps_counter = 0
+                    self.fps_counter.update()
 
                     # Add overlays
                     frame_with_overlay = self.add_overlay(frame.copy(), battery, False)
                     edges_with_overlay = self.add_overlay(edges.copy(), battery, True)
 
-                    # Combine views vertically (stacked)
-                    combined = np.vstack([frame_with_overlay, edges_with_overlay])
+                    # Combine views vertically (stacked) using library
+                    combined = VideoUtils.combine_views_vertical(
+                        frame_with_overlay, edges_with_overlay
+                    )
 
                     # Display
                     cv2.imshow('Tello Face Recognition - Color + Edges', combined)
@@ -321,9 +242,8 @@ class TelloFaceController:
                 # Update velocities
                 self.update_velocities()
 
-                # Small delay
-                if cv2.waitKey(10) & 0xFF == ord('q'):
-                    break
+                # Small delay (ESC only for quit - Q is for rotation!)
+                cv2.waitKey(10)
 
                 if keyboard.is_pressed('esc'):
                     print("\nESC pressed - Shutting down...")

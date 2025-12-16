@@ -45,6 +45,18 @@ test-connection:
     @echo "📡 Testing connection to Tello..."
     @uv run python -c "from djitellopy import Tello; t = Tello(); t.connect(); print('✅ Connected!'); print(f'Battery: {t.get_battery()}%'); print(f'Temperature: {t.get_temperature()}°C')"
 
+# Diagnose takeoff issues
+diagnose:
+    @echo "🔍 Running Takeoff Diagnostics..."
+    @echo "This will help identify why takeoff is failing"
+    uv run python diagnose_takeoff.py
+
+# Run example using the shared library
+example:
+    @echo "📚 Running Library Example..."
+    @echo "This demonstrates using lib.py and constants.py"
+    uv run python example_using_lib.py
+
 # Clean up Python cache files
 clean:
     @echo "🧹 Cleaning up..."
